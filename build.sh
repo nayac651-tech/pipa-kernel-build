@@ -19,7 +19,6 @@ cd "$WORK_DIR"
 # ==========================================
 echo "[*] Installing dependencies..."
 sudo apt-get update
-# python2 を除外し、python3-ミニマムな構成に変更
 sudo apt-get install -y git bc bison flex libssl-dev build-essential curl zip unzip python3
 
 echo "[*] Downloading Toolchain (Neutron Clang)..."
@@ -40,10 +39,9 @@ fi
 cd android_kernel
 
 # ==========================================
-# 3. Python 2 構文エラーの自動修正 (重要)
+# 3. Python 3 互換性パッチ
 # ==========================================
 echo "[*] Patching scripts for Python 3 compatibility..."
-# エラーの原因だった print 文を Python 3 形式に一括置換
 find scripts/ -name "*.py" -exec sed -i 's/print "\(.*\)"/print("\1")/g' {} +
 find scripts/ -name "*.py" -exec sed -i 's/print "error, forbidden warning:", m.group(2)/print("error, forbidden warning:", m.group(2))/g' {} +
 
@@ -61,18 +59,24 @@ if [ ! -d "../susfs4ksu" ]; then
     git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
 fi
 
-mkdir -p fs/susfs
-cp ../susfs4ksu/kernel_patches/fs/susfs.c fs/susfs/
-cp ../susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
-cp ../susfs4ksu/kernel_patches/fs/Kconfig fs/susfs/
-cp ../susfs4ksu/kernel_patches/fs/Makefile fs/susfs/
+# 4.19用のパッチディレクトリを指定
+SUSFS_PATCH_DIR="../susfs4ksu/kernel_patches"
 
+mkdir -p fs/susfs
+# 必要なファイルをコピー (4.19系を明示的に指定)
+cp "$SUSFS_PATCH_DIR/fs/susfs.c" fs/susfs/
+cp "$SUSFS_PATCH_DIR/include/linux/susfs.h" include/linux/
+cp "$SUSFS_PATCH_DIR/fs/Kconfig_susfs" fs/susfs/Kconfig
+cp "$SUSFS_PATCH_DIR/fs/Makefile_susfs" fs/susfs/Makefile
+
+# 既存の fs/Kconfig へのパッチ適用
 if ! grep -q "susfs" fs/Kconfig; then
     echo "[*] Patching fs/Kconfig..."
-    # 最後の endmenu の前に挿入
+    # 最後の endmenu の前に source を追加
     sed -i '$i source "fs/susfs/Kconfig"' fs/Kconfig
 fi
 
+# 既存の fs/Makefile へのパッチ適用
 if ! grep -q "susfs" fs/Makefile; then
     echo "[*] Patching fs/Makefile..."
     echo "obj-\$(CONFIG_KSU_SUSFS) += susfs/" >> fs/Makefile
@@ -81,13 +85,12 @@ fi
 # Defconfig への設定追加
 echo "[*] Updating Defconfig ($DEVICE_DEFCONFIG)..."
 CONFIG_PATH="arch/arm64/configs/$DEVICE_DEFCONFIG"
-# 既存の設定をクリーンアップ
 sed -i '/CONFIG_KSU/d' "$CONFIG_PATH"
 sed -i '/CONFIG_KSU_SUSFS/d' "$CONFIG_PATH"
-# 新規追加
 echo "CONFIG_KSU=y" >> "$CONFIG_PATH"
 echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_PATH"
 echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CONFIG_PATH"
+echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$CONFIG_PATH"
 
 # ==========================================
 # 6. ビルド実行
@@ -107,7 +110,8 @@ make O=out "$DEVICE_DEFCONFIG"
 make -j$(nproc --all) O=out \
     CC=clang \
     LLVM=1 \
-    LLVM_IAS=1
+    LLVM_IAS=1 \
+    CLANG_TRIPLE=aarch64-linux-gnu-
 
 # ==========================================
 # 7. AnyKernel3 によるZip作成
@@ -122,6 +126,6 @@ if [ -f "out/arch/arm64/boot/Image" ]; then
     zip -r9 "../KernelSU_SUSFS_Pipa.zip" * -x .git README.md *placeholder
     echo "[DONE] Final Zip: $WORK_DIR/KernelSU_SUSFS_Pipa.zip"
 else
-    echo "[ERROR] Build failed."
+    echo "[ERROR] Build failed. Check the logs above."
     exit 1
 fi
