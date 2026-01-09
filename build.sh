@@ -39,11 +39,13 @@ fi
 cd android_kernel
 
 # ==========================================
-# 3. Python 3 互換性パッチ
+# 3. Python 3 互換性パッチ (強化版)
 # ==========================================
 echo "[*] Patching scripts for Python 3 compatibility..."
+# 古い print 文 (print "text" や print line,) をすべて Python 3 形式に変換
 find scripts/ -name "*.py" -exec sed -i 's/print "\(.*\)"/print("\1")/g' {} +
-find scripts/ -name "*.py" -exec sed -i 's/print "error, forbidden warning:", m.group(2)/print("error, forbidden warning:", m.group(2))/g' {} +
+find scripts/ -name "*.py" -exec sed -i 's/print \(.*\),/print(\1, end=" ")/g' {} +
+find scripts/ -name "*.py" -exec sed -i 's/print \(.*\)/print(\1)/g' {} +
 
 # ==========================================
 # 4. KernelSU (KSU) の統合
@@ -52,32 +54,33 @@ echo "[*] Integrating KernelSU..."
 curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
 
 # ==========================================
-# 5. SUSFS (Root隠蔽) の統合
+# 5. SUSFS (Root隠蔽) の統合 (強化版)
 # ==========================================
 echo "[*] Integrating SUSFS..."
 if [ ! -d "../susfs4ksu" ]; then
     git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
 fi
 
-# 4.19用のパッチディレクトリを自動検索
+# 4.19用のパッチディレクトリを指定
 SUSFS_PATCH_DIR="../susfs4ksu/kernel_patches"
 
 mkdir -p fs/susfs
-# バージョン固有のフォルダ内を探してコピー (4.19ディレクトリを優先)
-cp "$SUSFS_PATCH_DIR/fs/susfs.c" fs/susfs/ || cp "$SUSFS_PATCH_DIR/4.19/fs/susfs.c" fs/susfs/
-cp "$SUSFS_PATCH_DIR/include/linux/susfs.h" include/linux/ || cp "$SUSFS_PATCH_DIR/4.19/include/linux/susfs.h" include/linux/
+# 必要なファイルを強制的に探し出し、正しい名前で配置
+find "$SUSFS_PATCH_DIR" -name "susfs.c" -exec cp {} fs/susfs/ \;
+find "$SUSFS_PATCH_DIR" -name "susfs.h" -exec cp {} include/linux/ \;
+find "$SUSFS_PATCH_DIR" -name "*Kconfig*" -path "*/4.19/*" -exec cp {} fs/susfs/Kconfig \;
+find "$SUSFS_PATCH_DIR" -name "*Makefile*" -path "*/4.19/*" -exec cp {} fs/susfs/Makefile \;
 
-# Kconfig と Makefile のコピー (名前の揺れに対応)
-find "$SUSFS_PATCH_DIR" -name "Kconfig_susfs" -exec cp {} fs/susfs/Kconfig \;
-find "$SUSFS_PATCH_DIR" -name "Makefile_susfs" -exec cp {} fs/susfs/Makefile \;
-
-# もし上記で見つからない場合のフォールバック
-[ ! -f fs/susfs/Kconfig ] && find "$SUSFS_PATCH_DIR" -name "Kconfig" -path "*/4.19/*" -exec cp {} fs/susfs/Kconfig \;
-[ ! -f fs/susfs/Makefile ] && find "$SUSFS_PATCH_DIR" -name "Makefile" -path "*/4.19/*" -exec cp {} fs/susfs/Makefile \;
+# ファイルが正しく配置されたかチェック (デバッグ用)
+if [ ! -f fs/susfs/Kconfig ]; then
+    echo "[!] Fallback: Searching any SUSFS Kconfig..."
+    find "$SUSFS_PATCH_DIR" -name "*Kconfig*" -exec cp {} fs/susfs/Kconfig \; -break
+fi
 
 # 既存の fs/Kconfig へのパッチ適用
 if ! grep -q "susfs" fs/Kconfig; then
     echo "[*] Patching fs/Kconfig..."
+    # 最後の endmenu の直前に挿入
     sed -i '$i source "fs/susfs/Kconfig"' fs/Kconfig
 fi
 
@@ -108,7 +111,8 @@ export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 export CC=clang
 export LD=ld.lld
 
-# defconfig適用
+# 以前のビルド成果物を一旦クリアしてクリーンビルド
+rm -rf out
 make O=out "$DEVICE_DEFCONFIG"
 
 # ビルド開始
