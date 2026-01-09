@@ -50,19 +50,18 @@ if __name__ == '__main__': main()
 EOF
 chmod +x scripts/gcc-wrapper.py
 
-# 3.1 ソース修正 & 警告をエラーにしない設定 (Clang対策)
+# 3.1 ソース修正 (壊れたフラグを直す & 警告をエラーにしない)
 echo "[*] Patching source and Makefiles..."
 sed -i 's/extern in_long_press;/extern int in_long_press;/g' arch/arm64/kernel/smp.c || true
-# 警告でビルドを止めないように Makefile を修正
-sed -i 's/-Werror//g' Makefile
-sed -i 's/-Werror//g' arch/arm64/Makefile
 
-# 4. KernelSU
-echo "[*] Integrating KernelSU..."
+# 安全に -Werror を除去（前回の失敗を修正）
+find . -name "Makefile*" -o -name "*.mk" | xargs sed -i 's/-Werror-/-W/g' 2>/dev/null || true
+find . -name "Makefile*" -o -name "*.mk" | xargs sed -i 's/-Werror/-Wno-error/g' 2>/dev/null || true
+
+# 4. KernelSU / SUSFS 統合
+echo "[*] Integrating KernelSU & SUSFS..."
 curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
 
-# 5. SUSFS
-echo "[*] Integrating SUSFS..."
 [ ! -d "../susfs4ksu" ] && git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
 mkdir -p fs/susfs include/linux
 cp "../susfs4ksu/kernel_patches/fs/susfs.c" fs/susfs/susfs.c || touch fs/susfs/susfs.c
@@ -71,6 +70,11 @@ echo -e 'config KSU_SUSFS\n    bool "SUSFS"\n    default y' > fs/susfs/Kconfig
 echo 'obj-y += susfs.o' > fs/susfs/Makefile
 grep -q "susfs/Kconfig" fs/Kconfig || sed -i '$i source "fs/susfs/Kconfig"' fs/Kconfig
 grep -q "obj-y += susfs/" fs/Makefile || echo "obj-y += susfs/" >> fs/Makefile
+
+# Defconfig
+CONFIG_PATH="arch/arm64/configs/$DEVICE_DEFCONFIG"
+sed -i '/CONFIG_KSU/d' "$CONFIG_PATH"
+{ echo "CONFIG_KSU=y"; echo "CONFIG_KSU_SUSFS=y"; } >> "$CONFIG_PATH"
 
 # 6. ビルド実行
 echo "[*] Starting Build..."
@@ -81,24 +85,25 @@ export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
 rm -rf out
 make O=out "$DEVICE_DEFCONFIG"
+# 新しい設定項目をすべてデフォルト(Nまたは標準)で埋める
+make O=out olddefconfig
 
 # ビルド実行
 set +e
-make -j$(nproc --all) O=out CC=clang LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- 2>&1 | tee build_log.txt
+make -j$(nproc --all) O=out \
+    CC=clang \
+    LLVM=1 \
+    LLVM_IAS=1 \
+    CLANG_TRIPLE=aarch64-linux-gnu- \
+    CROSS_COMPILE=aarch64-linux-gnu- 2>&1 | tee build_log.txt
 MAKE_RET=${PIPESTATUS[0]}
 set -e
 
 if [ $MAKE_RET -ne 0 ]; then
     echo "----------------------------------------------------"
-    echo "[!!!] BUILD FAILED! Showing last 100 lines of log..."
+    echo "[!!!] BUILD FAILED! Analysis below:"
     echo "----------------------------------------------------"
-    # エラー行を特定し、その周辺を表示
-    ERR_LINE=$(grep -n "error:" build_log.txt | head -n 1 | cut -d: -f1)
-    if [ ! -z "$ERR_LINE" ]; then
-        sed -n "$((ERR_LINE - 10)),$((ERR_LINE + 10))p" build_log.txt
-    else
-        tail -n 100 build_log.txt
-    fi
+    grep -i "error:" build_log.txt | head -n 20 || tail -n 50 build_log.txt
     exit 1
 fi
 
