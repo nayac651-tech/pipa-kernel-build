@@ -59,20 +59,25 @@ if [ ! -d "../susfs4ksu" ]; then
     git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
 fi
 
-# 4.19用のパッチディレクトリを指定
+# 4.19用のパッチディレクトリを自動検索
 SUSFS_PATCH_DIR="../susfs4ksu/kernel_patches"
 
 mkdir -p fs/susfs
-# 必要なファイルをコピー (4.19系を明示的に指定)
-cp "$SUSFS_PATCH_DIR/fs/susfs.c" fs/susfs/
-cp "$SUSFS_PATCH_DIR/include/linux/susfs.h" include/linux/
-cp "$SUSFS_PATCH_DIR/fs/Kconfig_susfs" fs/susfs/Kconfig
-cp "$SUSFS_PATCH_DIR/fs/Makefile_susfs" fs/susfs/Makefile
+# バージョン固有のフォルダ内を探してコピー (4.19ディレクトリを優先)
+cp "$SUSFS_PATCH_DIR/fs/susfs.c" fs/susfs/ || cp "$SUSFS_PATCH_DIR/4.19/fs/susfs.c" fs/susfs/
+cp "$SUSFS_PATCH_DIR/include/linux/susfs.h" include/linux/ || cp "$SUSFS_PATCH_DIR/4.19/include/linux/susfs.h" include/linux/
+
+# Kconfig と Makefile のコピー (名前の揺れに対応)
+find "$SUSFS_PATCH_DIR" -name "Kconfig_susfs" -exec cp {} fs/susfs/Kconfig \;
+find "$SUSFS_PATCH_DIR" -name "Makefile_susfs" -exec cp {} fs/susfs/Makefile \;
+
+# もし上記で見つからない場合のフォールバック
+[ ! -f fs/susfs/Kconfig ] && find "$SUSFS_PATCH_DIR" -name "Kconfig" -path "*/4.19/*" -exec cp {} fs/susfs/Kconfig \;
+[ ! -f fs/susfs/Makefile ] && find "$SUSFS_PATCH_DIR" -name "Makefile" -path "*/4.19/*" -exec cp {} fs/susfs/Makefile \;
 
 # 既存の fs/Kconfig へのパッチ適用
 if ! grep -q "susfs" fs/Kconfig; then
     echo "[*] Patching fs/Kconfig..."
-    # 最後の endmenu の前に source を追加
     sed -i '$i source "fs/susfs/Kconfig"' fs/Kconfig
 fi
 
@@ -126,6 +131,6 @@ if [ -f "out/arch/arm64/boot/Image" ]; then
     zip -r9 "../KernelSU_SUSFS_Pipa.zip" * -x .git README.md *placeholder
     echo "[DONE] Final Zip: $WORK_DIR/KernelSU_SUSFS_Pipa.zip"
 else
-    echo "[ERROR] Build failed. Check the logs above."
+    echo "[ERROR] Build failed."
     exit 1
 fi
