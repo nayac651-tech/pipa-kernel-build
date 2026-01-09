@@ -15,14 +15,12 @@ mkdir -p "$WORK_DIR"
 cd "$WORK_DIR"
 
 # ==========================================
-# 1. 環境構築 (Python 2 対応を含む)
+# 1. 環境構築
 # ==========================================
 echo "[*] Installing dependencies..."
 sudo apt-get update
-sudo apt-get install -y git bc bison flex libssl-dev build-essential curl zip unzip python2
-
-# Python 2 をデフォルトに設定 (gcc-wrapper.py 用)
-sudo ln -sf /usr/bin/python2 /usr/bin/python
+# python2 を除外し、python3-ミニマムな構成に変更
+sudo apt-get install -y git bc bison flex libssl-dev build-essential curl zip unzip python3
 
 echo "[*] Downloading Toolchain (Neutron Clang)..."
 mkdir -p toolchain/clang
@@ -42,34 +40,39 @@ fi
 cd android_kernel
 
 # ==========================================
-# 3. KernelSU (KSU) の統合
+# 3. Python 2 構文エラーの自動修正 (重要)
+# ==========================================
+echo "[*] Patching scripts for Python 3 compatibility..."
+# エラーの原因だった print 文を Python 3 形式に一括置換
+find scripts/ -name "*.py" -exec sed -i 's/print "\(.*\)"/print("\1")/g' {} +
+find scripts/ -name "*.py" -exec sed -i 's/print "error, forbidden warning:", m.group(2)/print("error, forbidden warning:", m.group(2))/g' {} +
+
+# ==========================================
+# 4. KernelSU (KSU) の統合
 # ==========================================
 echo "[*] Integrating KernelSU..."
 curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
 
 # ==========================================
-# 4. SUSFS (Root隠蔽) の統合
+# 5. SUSFS (Root隠蔽) の統合
 # ==========================================
 echo "[*] Integrating SUSFS..."
 if [ ! -d "../susfs4ksu" ]; then
     git clone --depth=1 https://gitlab.com/simonpunk/susfs4ksu.git ../susfs4ksu
 fi
 
-# ファイルのコピー (ディレクトリ構造を維持してコピー)
 mkdir -p fs/susfs
 cp ../susfs4ksu/kernel_patches/fs/susfs.c fs/susfs/
 cp ../susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/
-# Kconfig と Makefile もコピー
 cp ../susfs4ksu/kernel_patches/fs/Kconfig fs/susfs/
 cp ../susfs4ksu/kernel_patches/fs/Makefile fs/susfs/
 
-# 既存の fs/Kconfig へのパッチ適用
 if ! grep -q "susfs" fs/Kconfig; then
     echo "[*] Patching fs/Kconfig..."
+    # 最後の endmenu の前に挿入
     sed -i '$i source "fs/susfs/Kconfig"' fs/Kconfig
 fi
 
-# 既存の fs/Makefile へのパッチ適用
 if ! grep -q "susfs" fs/Makefile; then
     echo "[*] Patching fs/Makefile..."
     echo "obj-\$(CONFIG_KSU_SUSFS) += susfs/" >> fs/Makefile
@@ -78,13 +81,16 @@ fi
 # Defconfig への設定追加
 echo "[*] Updating Defconfig ($DEVICE_DEFCONFIG)..."
 CONFIG_PATH="arch/arm64/configs/$DEVICE_DEFCONFIG"
-sed -i '/CONFIG_KSU/d' "$CONFIG_PATH" # 重複防止
+# 既存の設定をクリーンアップ
+sed -i '/CONFIG_KSU/d' "$CONFIG_PATH"
 sed -i '/CONFIG_KSU_SUSFS/d' "$CONFIG_PATH"
+# 新規追加
 echo "CONFIG_KSU=y" >> "$CONFIG_PATH"
 echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_PATH"
+echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CONFIG_PATH"
 
 # ==========================================
-# 5. ビルド実行
+# 6. ビルド実行
 # ==========================================
 echo "[*] Starting Build..."
 export ARCH=arm64
@@ -104,7 +110,7 @@ make -j$(nproc --all) O=out \
     LLVM_IAS=1
 
 # ==========================================
-# 6. AnyKernel3 によるZip作成
+# 7. AnyKernel3 によるZip作成
 # ==========================================
 if [ -f "out/arch/arm64/boot/Image" ]; then
     echo "[SUCCESS] Kernel Image built successfully!"
