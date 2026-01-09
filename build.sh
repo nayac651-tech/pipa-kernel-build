@@ -31,7 +31,7 @@ echo "[*] Cloning Kernel Source..."
 [ ! -d "android_kernel" ] && git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_SOURCE_URL" android_kernel
 cd android_kernel
 
-# 3. Python 3 互換性修正
+# 3. 各種修正 (Python, smp.c, Makefile)
 cat << 'EOF' > scripts/gcc-wrapper.py
 #!/usr/bin/env python3
 import os, sys, subprocess
@@ -50,15 +50,11 @@ if __name__ == '__main__': main()
 EOF
 chmod +x scripts/gcc-wrapper.py
 
-# 3.1 ソース修正 (壊れたフラグを直す & 警告をエラーにしない)
-echo "[*] Patching source and Makefiles..."
 sed -i 's/extern in_long_press;/extern int in_long_press;/g' arch/arm64/kernel/smp.c || true
-
-# 安全に -Werror を除去（前回の失敗を修正）
 find . -name "Makefile*" -o -name "*.mk" | xargs sed -i 's/-Werror-/-W/g' 2>/dev/null || true
 find . -name "Makefile*" -o -name "*.mk" | xargs sed -i 's/-Werror/-Wno-error/g' 2>/dev/null || true
 
-# 4. KernelSU / SUSFS 統合
+# 4. KernelSU & SUSFS
 echo "[*] Integrating KernelSU & SUSFS..."
 curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -
 
@@ -71,44 +67,40 @@ echo 'obj-y += susfs.o' > fs/susfs/Makefile
 grep -q "susfs/Kconfig" fs/Kconfig || sed -i '$i source "fs/susfs/Kconfig"' fs/Kconfig
 grep -q "obj-y += susfs/" fs/Makefile || echo "obj-y += susfs/" >> fs/Makefile
 
-# Defconfig
-CONFIG_PATH="arch/arm64/configs/$DEVICE_DEFCONFIG"
-sed -i '/CONFIG_KSU/d' "$CONFIG_PATH"
-{ echo "CONFIG_KSU=y"; echo "CONFIG_KSU_SUSFS=y"; } >> "$CONFIG_PATH"
-
-# 6. ビルド実行
+# 5. ビルド実行
 echo "[*] Starting Build..."
 export ARCH=arm64
 export SUBARCH=arm64
+# GNU Assemblerを明示的に使用
 export CROSS_COMPILE=aarch64-linux-gnu-
 export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
 rm -rf out
 make O=out "$DEVICE_DEFCONFIG"
-# 新しい設定項目をすべてデフォルト(Nまたは標準)で埋める
 make O=out olddefconfig
 
-# ビルド実行
+# LLVM_IAS=0 に設定して、aes-modes.S のアセンブラエラーを回避
 set +e
 make -j$(nproc --all) O=out \
     CC=clang \
     LLVM=1 \
-    LLVM_IAS=1 \
+    LLVM_IAS=0 \
     CLANG_TRIPLE=aarch64-linux-gnu- \
-    CROSS_COMPILE=aarch64-linux-gnu- 2>&1 | tee build_log.txt
+    CROSS_COMPILE=aarch64-linux-gnu- \
+    CROSS_COMPILE_ARM32=arm-linux-gnueabi- 2>&1 | tee build_log.txt
 MAKE_RET=${PIPESTATUS[0]}
 set -e
 
 if [ $MAKE_RET -ne 0 ]; then
     echo "----------------------------------------------------"
-    echo "[!!!] BUILD FAILED! Analysis below:"
-    echo "----------------------------------------------------"
+    echo "[!!!] BUILD FAILED! Check error below:"
     grep -i "error:" build_log.txt | head -n 20 || tail -n 50 build_log.txt
     exit 1
 fi
 
-# 7. パッケージ化
+# 6. パッケージ化
 if [ -f "out/arch/arm64/boot/Image" ]; then
+    echo "[SUCCESS] Image found!"
     cd "$WORK_DIR"
     git clone --depth=1 "$ANYKERNEL3_URL" AnyKernel3
     cp "$WORK_DIR/android_kernel/out/arch/arm64/boot/Image" AnyKernel3/
