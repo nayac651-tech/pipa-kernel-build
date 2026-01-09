@@ -50,9 +50,9 @@ if __name__ == '__main__': main()
 EOF
 chmod +x scripts/gcc-wrapper.py
 
-# 3.1 ソースコードのバグ修正 (smp.c の型指定ミスを修正)
-echo "[*] Patching smp.c for type specifier error..."
-sed -i 's/extern in_long_press;/extern int in_long_press;/g' arch/arm64/kernel/smp.c
+# 3.1 既知のバグ修正
+echo "[*] Patching known source errors..."
+sed -i 's/extern in_long_press;/extern int in_long_press;/g' arch/arm64/kernel/smp.c || true
 
 # 4. KernelSU
 echo "[*] Integrating KernelSU..."
@@ -69,11 +69,6 @@ echo 'obj-y += susfs.o' > fs/susfs/Makefile
 grep -q "susfs/Kconfig" fs/Kconfig || sed -i '$i source "fs/susfs/Kconfig"' fs/Kconfig
 grep -q "obj-y += susfs/" fs/Makefile || echo "obj-y += susfs/" >> fs/Makefile
 
-# Defconfig
-CONFIG_PATH="arch/arm64/configs/$DEVICE_DEFCONFIG"
-sed -i '/CONFIG_KSU/d' "$CONFIG_PATH"
-{ echo "CONFIG_KSU=y"; echo "CONFIG_KSU_SUSFS=y"; } >> "$CONFIG_PATH"
-
 # 6. ビルド実行
 echo "[*] Starting Build..."
 export ARCH=arm64
@@ -84,26 +79,30 @@ export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 rm -rf out
 make O=out "$DEVICE_DEFCONFIG"
 
-# ビルド開始 (並列)
-make -j$(nproc --all) O=out \
-    CC=clang \
-    LLVM=1 \
-    LLVM_IAS=1 \
-    CLANG_TRIPLE=aarch64-linux-gnu- \
-    CROSS_COMPILE=aarch64-linux-gnu- \
-    CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+# ビルド実行（ログを一時ファイルに保存）
+set +e # makeの失敗で即終了させない
+make -j$(nproc --all) O=out CC=clang LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- 2>&1 | tee build_log.txt
+MAKE_RET=$?
+set -e
+
+if [ $MAKE_RET -ne 0 ]; then
+    echo "----------------------------------------------------"
+    echo "[!!!] BUILD FAILED! Extracting actual error cause..."
+    echo "----------------------------------------------------"
+    # ログの中から 'error:' を含む行とその周辺を表示
+    grep -B 3 -A 5 "error:" build_log.txt || tail -n 50 build_log.txt
+    exit 1
+fi
 
 # 7. パッケージ化
 if [ -f "out/arch/arm64/boot/Image" ]; then
-    echo "[SUCCESS] Kernel Built!"
     cd "$WORK_DIR"
     git clone --depth=1 "$ANYKERNEL3_URL" AnyKernel3
     cp "$WORK_DIR/android_kernel/out/arch/arm64/boot/Image" AnyKernel3/
     cd AnyKernel3
     sed -i 's/device.name1=.*/device.name1=pipa/' anykernel.sh
     zip -r9 "../KernelSU_SUSFS_Pipa.zip" * -x .git README.md
-    echo "[DONE] Zip: $WORK_DIR/KernelSU_SUSFS_Pipa.zip"
 else
-    echo "[FATAL] Build failed."
+    echo "[FATAL] Image not found."
     exit 1
 fi
