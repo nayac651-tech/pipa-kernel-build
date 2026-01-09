@@ -50,9 +50,12 @@ if __name__ == '__main__': main()
 EOF
 chmod +x scripts/gcc-wrapper.py
 
-# 3.1 既知のバグ修正
-echo "[*] Patching known source errors..."
+# 3.1 ソース修正 & 警告をエラーにしない設定 (Clang対策)
+echo "[*] Patching source and Makefiles..."
 sed -i 's/extern in_long_press;/extern int in_long_press;/g' arch/arm64/kernel/smp.c || true
+# 警告でビルドを止めないように Makefile を修正
+sed -i 's/-Werror//g' Makefile
+sed -i 's/-Werror//g' arch/arm64/Makefile
 
 # 4. KernelSU
 echo "[*] Integrating KernelSU..."
@@ -79,18 +82,23 @@ export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 rm -rf out
 make O=out "$DEVICE_DEFCONFIG"
 
-# ビルド実行（ログを一時ファイルに保存）
-set +e # makeの失敗で即終了させない
+# ビルド実行
+set +e
 make -j$(nproc --all) O=out CC=clang LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- 2>&1 | tee build_log.txt
-MAKE_RET=$?
+MAKE_RET=${PIPESTATUS[0]}
 set -e
 
 if [ $MAKE_RET -ne 0 ]; then
     echo "----------------------------------------------------"
-    echo "[!!!] BUILD FAILED! Extracting actual error cause..."
+    echo "[!!!] BUILD FAILED! Showing last 100 lines of log..."
     echo "----------------------------------------------------"
-    # ログの中から 'error:' を含む行とその周辺を表示
-    grep -B 3 -A 5 "error:" build_log.txt || tail -n 50 build_log.txt
+    # エラー行を特定し、その周辺を表示
+    ERR_LINE=$(grep -n "error:" build_log.txt | head -n 1 | cut -d: -f1)
+    if [ ! -z "$ERR_LINE" ]; then
+        sed -n "$((ERR_LINE - 10)),$((ERR_LINE + 10))p" build_log.txt
+    else
+        tail -n 100 build_log.txt
+    fi
     exit 1
 fi
 
@@ -102,6 +110,7 @@ if [ -f "out/arch/arm64/boot/Image" ]; then
     cd AnyKernel3
     sed -i 's/device.name1=.*/device.name1=pipa/' anykernel.sh
     zip -r9 "../KernelSU_SUSFS_Pipa.zip" * -x .git README.md
+    echo "[DONE] Zip: $WORK_DIR/KernelSU_SUSFS_Pipa.zip"
 else
     echo "[FATAL] Image not found."
     exit 1
