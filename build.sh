@@ -31,7 +31,7 @@ echo "[*] Cloning Kernel Source..."
 [ ! -d "android_kernel" ] && git clone --depth=1 -b "$KERNEL_BRANCH" "$KERNEL_SOURCE_URL" android_kernel
 cd android_kernel
 
-# 3. Python 3 互換性修正 (成功済み)
+# 3. Python 3 互換性修正
 cat << 'EOF' > scripts/gcc-wrapper.py
 #!/usr/bin/env python3
 import os, sys, subprocess
@@ -49,6 +49,10 @@ def main():
 if __name__ == '__main__': main()
 EOF
 chmod +x scripts/gcc-wrapper.py
+
+# 3.1 ソースコードのバグ修正 (smp.c の型指定ミスを修正)
+echo "[*] Patching smp.c for type specifier error..."
+sed -i 's/extern in_long_press;/extern int in_long_press;/g' arch/arm64/kernel/smp.c
 
 # 4. KernelSU
 echo "[*] Integrating KernelSU..."
@@ -80,22 +84,25 @@ export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 rm -rf out
 make O=out "$DEVICE_DEFCONFIG"
 
-# 並列ビルドを実行し、失敗した場合はシングルスレッドで再実行してエラー箇所を特定する
-if ! make -j$(nproc --all) O=out CC=clang LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu-; then
-    echo "!! Parallel build failed. Retrying with single thread to catch the error..."
-    # 1スレッドで実行することで、エラーメッセージが他のログに埋もれなくなります
-    make -j1 O=out CC=clang LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu-
-fi
+# ビルド開始 (並列)
+make -j$(nproc --all) O=out \
+    CC=clang \
+    LLVM=1 \
+    LLVM_IAS=1 \
+    CLANG_TRIPLE=aarch64-linux-gnu- \
+    CROSS_COMPILE=aarch64-linux-gnu- \
+    CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
 # 7. パッケージ化
 if [ -f "out/arch/arm64/boot/Image" ]; then
+    echo "[SUCCESS] Kernel Built!"
     cd "$WORK_DIR"
     git clone --depth=1 "$ANYKERNEL3_URL" AnyKernel3
     cp "$WORK_DIR/android_kernel/out/arch/arm64/boot/Image" AnyKernel3/
     cd AnyKernel3
     sed -i 's/device.name1=.*/device.name1=pipa/' anykernel.sh
     zip -r9 "../KernelSU_SUSFS_Pipa.zip" * -x .git README.md
-    echo "[DONE] Zip created!"
+    echo "[DONE] Zip: $WORK_DIR/KernelSU_SUSFS_Pipa.zip"
 else
     echo "[FATAL] Build failed."
     exit 1
