@@ -14,18 +14,21 @@ mkdir -p "$WORK_DIR"
 cd "$WORK_DIR"
 
 # ==========================================
-# 1. 環境構築
+# 1. 環境構築 (コンパイラの追加)
 # ==========================================
 echo "[*] Installing dependencies..."
 sudo apt-get update
-sudo apt-get install -y git bc bison flex libssl-dev build-essential curl zip unzip python3
+sudo apt-get install -y git bc bison flex libssl-dev build-essential curl zip unzip python3 \
+    gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libncurses5-dev
 
-echo "[*] Downloading Toolchain..."
+echo "[*] Downloading Neutron Clang..."
 mkdir -p toolchain/clang
 cd toolchain/clang
 bash <(curl -s "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman") -S
 cd "$WORK_DIR"
-export PATH="$WORK_DIR/toolchain/clang/bin:$PATH"
+
+# パス設定: Clang と システムの GCC 両方を使えるようにする
+export PATH="$WORK_DIR/toolchain/clang/bin:/usr/bin:$PATH"
 
 # ==========================================
 # 2. カーネルソースのクローン
@@ -37,7 +40,7 @@ fi
 cd android_kernel
 
 # ==========================================
-# 3. Python 3 互換性修正 (直接上書き)
+# 3. Python 3 互換性修正 (前回成功した方法)
 # ==========================================
 echo "[*] Overwriting gcc-wrapper.py with Python 3 version..."
 cat << 'EOF' > scripts/gcc-wrapper.py
@@ -45,27 +48,27 @@ cat << 'EOF' > scripts/gcc-wrapper.py
 import os
 import sys
 import subprocess
-import re
 
 def main():
     args = sys.argv[1:]
+    if not args:
+        return
     try:
         proc = subprocess.Popen(args, stderr=subprocess.PIPE)
         _, stderr = proc.communicate()
         if proc.returncode != 0:
-            print(stderr.decode('utf-8', 'ignore'), file=sys.stderr)
+            if stderr:
+                print(stderr.decode('utf-8', 'ignore'), file=sys.stderr)
             sys.exit(proc.returncode)
     except OSError as e:
-        print(args[0] + ':', e.strerror, file=sys.stderr)
+        # コンパイラが見つからないエラーを詳細に出力
+        print(f"Error executing {args[0]}: {e.strerror}", file=sys.stderr)
         sys.exit(1)
 
 if __name__ == '__main__':
     main()
 EOF
 chmod +x scripts/gcc-wrapper.py
-
-# 他のスクリプトの単純な print 文のみ修正
-find scripts/ -name "*.py" -not -name "gcc-wrapper.py" -exec sed -i 's/print "\(.*\)"/print("\1")/g' {} +
 
 # ==========================================
 # 4. KernelSU (KSU) の統合
@@ -84,32 +87,13 @@ fi
 SUSFS_PATCH_DIR="../susfs4ksu/kernel_patches"
 mkdir -p fs/susfs
 
-# 4.19用のファイルを特定してコピー (力技)
-echo "[*] Copying SUSFS files..."
 cp "$SUSFS_PATCH_DIR/fs/susfs.c" fs/susfs/ || find "$SUSFS_PATCH_DIR" -name "susfs.c" -exec cp {} fs/susfs/ \;
 cp "$SUSFS_PATCH_DIR/include/linux/susfs.h" include/linux/ || find "$SUSFS_PATCH_DIR" -name "susfs.h" -exec cp {} include/linux/ \;
 
-# Kconfig と Makefile を探して強制コピー
-find "$SUSFS_PATCH_DIR" -name "*Kconfig*" | grep "4.19" | xargs -I {} cp {} fs/susfs/Kconfig || \
-find "$SUSFS_PATCH_DIR" -name "Kconfig_susfs" | xargs -I {} cp {} fs/susfs/Kconfig
+# Kconfig / Makefile のダミー生成を回避し、できるだけ検索
+find "$SUSFS_PATCH_DIR" -name "*Kconfig*" | grep "4.19" | xargs -I {} cp {} fs/susfs/Kconfig || echo 'config KSU_SUSFS' > fs/susfs/Kconfig
+find "$SUSFS_PATCH_DIR" -name "*Makefile*" | grep "4.19" | xargs -I {} cp {} fs/susfs/Makefile || echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' > fs/susfs/Makefile
 
-find "$SUSFS_PATCH_DIR" -name "*Makefile*" | grep "4.19" | xargs -I {} cp {} fs/susfs/Makefile || \
-find "$SUSFS_PATCH_DIR" -name "Makefile_susfs" | xargs -I {} cp {} fs/susfs/Makefile
-
-# もしそれでも空ならダミーを作る（ビルドを止めないため）
-if [ ! -s fs/susfs/Kconfig ]; then
-    echo 'config KSU_SUSFS' > fs/susfs/Kconfig
-    echo '    bool "SUSFS Support"' >> fs/susfs/Kconfig
-    echo '    default y' >> fs/susfs/Kconfig
-fi
-if [ ! -s fs/susfs/Makefile ]; then
-    echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' > fs/susfs/Makefile
-fi
-
-echo "[*] Final SUSFS check:"
-ls -l fs/susfs/
-
-# パッチ適用
 if ! grep -q "susfs" fs/Kconfig; then
     sed -i '$i source "fs/susfs/Kconfig"' fs/Kconfig
 fi
@@ -133,18 +117,23 @@ sed -i '/CONFIG_KSU/d' "$CONFIG_PATH"
 echo "[*] Starting Build..."
 export ARCH=arm64
 export SUBARCH=arm64
+
+# 明示的にパスを指定
 export CROSS_COMPILE=aarch64-linux-gnu-
-export CC=clang
-export LD=ld.lld
+export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
 rm -rf out
 make O=out "$DEVICE_DEFCONFIG"
+
+# ビルド開始
+# LLVM=1 を使用しつつ、GCCの補助も有効にする設定
 make -j$(nproc --all) O=out \
     CC=clang \
     LLVM=1 \
     LLVM_IAS=1 \
     CLANG_TRIPLE=aarch64-linux-gnu- \
-    CROSS_COMPILE=aarch64-linux-gnu-
+    CROSS_COMPILE=aarch64-linux-gnu- \
+    CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
 # ==========================================
 # 7. 成果物パッケージ化
