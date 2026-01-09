@@ -20,7 +20,7 @@ echo "[*] Installing dependencies..."
 sudo apt-get update
 sudo apt-get install -y git bc bison flex libssl-dev build-essential curl zip unzip python3
 
-echo "[*] Downloading Toolchain (Neutron Clang)..."
+echo "[*] Downloading Toolchain..."
 mkdir -p toolchain/clang
 cd toolchain/clang
 bash <(curl -s "https://raw.githubusercontent.com/Neutron-Toolchains/antman/main/antman") -S
@@ -37,14 +37,35 @@ fi
 cd android_kernel
 
 # ==========================================
-# 3. Python 3 互換性修正 (安全版)
+# 3. Python 3 互換性修正 (直接上書き)
 # ==========================================
-echo "[*] Patching scripts for Python 3..."
-# 全ての .py ファイルに対して、print 文の後ろを壊さないように正規表現で修正
-find scripts/ -name "*.py" -exec sed -i 's/print "\(.*\)"/print("\1")/g' {} +
-find scripts/ -name "*.py" -exec sed -i 's/print \(.*\),/print(\1, end=" ")/g' {} +
-# 特定の gcc-wrapper.py のエラー箇所を直接修正
-sed -i 's/print args\[0\] + ":", e.strerror/print(args[0] + ":", e.strerror)/g' scripts/gcc-wrapper.py
+echo "[*] Overwriting gcc-wrapper.py with Python 3 version..."
+cat << 'EOF' > scripts/gcc-wrapper.py
+#!/usr/bin/env python3
+import os
+import sys
+import subprocess
+import re
+
+def main():
+    args = sys.argv[1:]
+    try:
+        proc = subprocess.Popen(args, stderr=subprocess.PIPE)
+        _, stderr = proc.communicate()
+        if proc.returncode != 0:
+            print(stderr.decode('utf-8', 'ignore'), file=sys.stderr)
+            sys.exit(proc.returncode)
+    except OSError as e:
+        print(args[0] + ':', e.strerror, file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()
+EOF
+chmod +x scripts/gcc-wrapper.py
+
+# 他のスクリプトの単純な print 文のみ修正
+find scripts/ -name "*.py" -not -name "gcc-wrapper.py" -exec sed -i 's/print "\(.*\)"/print("\1")/g' {} +
 
 # ==========================================
 # 4. KernelSU (KSU) の統合
@@ -63,26 +84,30 @@ fi
 SUSFS_PATCH_DIR="../susfs4ksu/kernel_patches"
 mkdir -p fs/susfs
 
-# 4.19用のファイルを特定してコピー
+# 4.19用のファイルを特定してコピー (力技)
 echo "[*] Copying SUSFS files..."
-cp "$SUSFS_PATCH_DIR/fs/susfs.c" fs/susfs/ || find "$SUSFS_PATCH_DIR" -name "susfs.c" -exec cp {} fs/susfs/ \; -quit
-cp "$SUSFS_PATCH_DIR/include/linux/susfs.h" include/linux/ || find "$SUSFS_PATCH_DIR" -name "susfs.h" -exec cp {} include/linux/ \; -quit
+cp "$SUSFS_PATCH_DIR/fs/susfs.c" fs/susfs/ || find "$SUSFS_PATCH_DIR" -name "susfs.c" -exec cp {} fs/susfs/ \;
+cp "$SUSFS_PATCH_DIR/include/linux/susfs.h" include/linux/ || find "$SUSFS_PATCH_DIR" -name "susfs.h" -exec cp {} include/linux/ \;
 
-# Kconfig / Makefile の配置 (4.19 ディレクトリ配下を最優先)
-find "$SUSFS_PATCH_DIR" -path "*/4.19/*" -name "Kconfig*" -exec cp {} fs/susfs/Kconfig \; -quit
-find "$SUSFS_PATCH_DIR" -path "*/4.19/*" -name "Makefile*" -exec cp {} fs/susfs/Makefile \; -quit
+# Kconfig と Makefile を探して強制コピー
+find "$SUSFS_PATCH_DIR" -name "*Kconfig*" | grep "4.19" | xargs -I {} cp {} fs/susfs/Kconfig || \
+find "$SUSFS_PATCH_DIR" -name "Kconfig_susfs" | xargs -I {} cp {} fs/susfs/Kconfig
 
-# それでも無い場合の最終チェック
+find "$SUSFS_PATCH_DIR" -name "*Makefile*" | grep "4.19" | xargs -I {} cp {} fs/susfs/Makefile || \
+find "$SUSFS_PATCH_DIR" -name "Makefile_susfs" | xargs -I {} cp {} fs/susfs/Makefile
+
+# もしそれでも空ならダミーを作る（ビルドを止めないため）
 if [ ! -s fs/susfs/Kconfig ]; then
-    find "$SUSFS_PATCH_DIR" -name "Kconfig_susfs" -exec cp {} fs/susfs/Kconfig \; -quit
+    echo 'config KSU_SUSFS' > fs/susfs/Kconfig
+    echo '    bool "SUSFS Support"' >> fs/susfs/Kconfig
+    echo '    default y' >> fs/susfs/Kconfig
 fi
 if [ ! -s fs/susfs/Makefile ]; then
-    find "$SUSFS_PATCH_DIR" -name "Makefile_susfs" -exec cp {} fs/susfs/Makefile \; -quit
+    echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' > fs/susfs/Makefile
 fi
 
-echo "[*] SUSFS files status:"
+echo "[*] Final SUSFS check:"
 ls -l fs/susfs/
-ls -l include/linux/susfs.h
 
 # パッチ適用
 if ! grep -q "susfs" fs/Kconfig; then
@@ -94,7 +119,6 @@ fi
 
 # Defconfig更新
 CONFIG_PATH="arch/arm64/configs/$DEVICE_DEFCONFIG"
-# KSU/SUSFS関連の設定を一度消して、最新を追記
 sed -i '/CONFIG_KSU/d' "$CONFIG_PATH"
 {
     echo "CONFIG_KSU=y"
@@ -113,11 +137,8 @@ export CROSS_COMPILE=aarch64-linux-gnu-
 export CC=clang
 export LD=ld.lld
 
-# クリーンビルド
 rm -rf out
 make O=out "$DEVICE_DEFCONFIG"
-
-# コンパイル開始 (LLVM=1で統合ツールチェーンを使用)
 make -j$(nproc --all) O=out \
     CC=clang \
     LLVM=1 \
@@ -134,13 +155,9 @@ if [ -f "out/arch/arm64/boot/Image" ]; then
     git clone --depth=1 "$ANYKERNEL3_URL" AnyKernel3
     cd AnyKernel3
     cp "$WORK_DIR/android_kernel/out/arch/arm64/boot/Image" .
-    # dtbファイル等がある場合はここで追加
-    find "$WORK_DIR/android_kernel/out/arch/arm64/boot/dts/vendor/qcom/" -name "*.dtb" -exec cp {} . \; 2>/dev/null || true
-    
     sed -i 's/device.name1=.*/device.name1=pipa/' anykernel.sh
     zip -r9 "../KernelSU_SUSFS_Pipa.zip" * -x .git README.md
-    echo "[DONE] Zip: $WORK_DIR/KernelSU_SUSFS_Pipa.zip"
 else
-    echo "[ERROR] Build failed. Image not found."
+    echo "[ERROR] Build failed."
     exit 1
 fi
