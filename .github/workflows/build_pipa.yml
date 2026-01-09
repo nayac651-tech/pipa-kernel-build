@@ -1,0 +1,31 @@
+name: Build Kernel for Xiaomi Pad 6 (Pipa)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v3
+
+    - name: Free Disk Space (Optional)
+      run: |
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /opt/ghc
+        sudo rm -rf "/usr/local/share/boost"
+        sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+
+    - name: Run Build Script
+      run: |
+        # build.sh という名前で上記スクリプトを保存している前提
+        chmod +x build.sh
+        ./build.sh
+
+    - name: Upload Kernel Zip
+      uses: actions/upload-artifact@v4
+      with:
+        name: KernelSU_SUSFS_Pipa_Zip
+        path: kernel_workspace/KernelSU_SUSFS_Pipa.zip
